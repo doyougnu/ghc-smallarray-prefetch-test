@@ -4,14 +4,14 @@ let
 
   inherit (nixpkgs) pkgs;
 
-  f = { mkDerivation, base, lib, random, mwc-random, numactl, cabal-install, haskell-language-server }:
+  f = { mkDerivation, base, lib, random, mwc-random,hashing, numactl, cabal-install, haskell-language-server }:
       mkDerivation {
         pname = "testing-prefetch";
         version = "0.1.0.0";
         src = ./.;
         isLibrary = false;
         isExecutable = true;
-        executableHaskellDepends = [ base random mwc-random ];
+        executableHaskellDepends = [ base random hashing];
         buildTools = [ numactl cabal-install haskell-language-server ];
         license = "unknown";
         hydraPlatforms = lib.platforms.none;

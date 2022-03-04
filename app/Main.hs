@@ -15,6 +15,9 @@ import Control.DeepSeq
 import System.Random
 import System.Random.Stateful
 import Data.Foldable
+import qualified Data.ByteString as B
+import Data.Word
+import Crypto.Hash
 
 data Array             a = A   (Array#      a)
 data SmallArray        a = SA  (SmallArray# a)
@@ -29,10 +32,10 @@ main = do
     let low  = 0
         n    = 5000
         size = case n of (I# i) -> i
-        element = (42, 1729)
-
-        es :: [(Int,Int)]
-        es   = force $! take n $ randoms gen
+        element :: SHA512
+        element = hash . B.pack . pure $ (0 :: Word8)
+        es :: [SHA512]
+        es   = map hash $ randomBStrings n gen
 
     smArr@(SMA smarr# ) <- IO (\s0 -> case newSmallArray# size element s0 of
                                   (# s1, ba# #) -> (# s1, SMA ba# #))
@@ -55,7 +58,7 @@ main = do
     -- the array enough so that elements now point to "random" regions of the
     -- heap. Or, a better way to think about it, is that now the array is
     -- shuffled such that each element *is not* read in allocation order.
-    let perterb = shuffleArr : shuffleArr : sortArr : perterb
+    let perterb = shuffleArr : shuffleArr : perterb
     -- printSMA smArr
     -- putStrLn "\n----------------------\n"
 
@@ -71,17 +74,20 @@ main = do
 
     -- sum the array
     -- randomSum smArr n >>= print
-    randomSumP smArr n >>= print
+    -- randomSumP smArr n >>= print
 
     -- let sumM (a,b) y = return $! b + y + a
 
     -- foldlSMA'  sumM 0 smArr >>= print
     -- foldlSMA'P sumM 0 smArr >>= print
 
+    ---------------------------- Hashing ---------------------------------------
+    -- showSMA' smArr
+    showSMA'P smArr
 
 
 
-
+------------------------------ Array helpers -----------------------------------
 writeSMA :: SmallMutableArray a -> Int -> a -> IO ()
 writeSMA (SMA ba#) (I# i#) e = IO (\s ->
     case writeSmallArray# ba# i# e s of
@@ -107,11 +113,6 @@ readSA (SA ba#) (I# i#) = IO (\s -> case indexSmallArray# ba# i# of
 readA :: Array a -> Int -> IO a
 readA (A ba#) (I# i#) = IO (\s -> case indexArray# ba# i# of
                                (# i #) -> (# s, i #))
-
-inlinePerformIO :: IO a -> a
-inlinePerformIO (IO m) = case m realWorld# of
-  (# _, r #) -> r
-{-# INLINE inlinePerformIO #-}
 
 printSMA :: Show a => SmallMutableArray a -> IO ()
 printSMA = foldlSMA' go ()
@@ -167,8 +168,6 @@ prefetchSmallArray = void . prefetchSmallArrayBy prefetchSmallArray2#
 prefetchSmallArray' :: SmallArray a -> SmallArray a
 prefetchSmallArray' = inlinePerformIO . prefetchSmallArrayBy prefetchSmallArray2#
 
-
-
 prefetchArrayBy
   :: (Array# a -> Int# -> State# RealWorld -> State# RealWorld)
   -> Array a
@@ -180,25 +179,6 @@ prefetchArray = void . prefetchArrayBy prefetchArray3#
 
 prefetchArray' :: Array a -> Array a
 prefetchArray' = inlinePerformIO . prefetchArrayBy prefetchArray3#
-
-
-foldlSMA' :: (a -> b -> IO b) -> b -> SmallMutableArray a -> IO b
-foldlSMA' f acc ary0 = go (lengthSMA ary0 - 1) acc
-  where
-    go 0  !z = return z
-    go i   z = readSMA ary0 i >>= flip f z >>= go (min (i-16) 0)
-{-# INLINE foldlSMA' #-}
-
-foldlSMA'P :: (a -> b -> IO b) -> b -> SmallMutableArray a -> IO b
-foldlSMA'P f acc ary0 = go l acc
-  where
-    l = lengthSMA ary0 - 1
-    go 0 !z = return z
-    go i  z = do prefetchSmallMutableArray (i-14) ary0
-                   >> prefetchSmallMutableArray (i-21) ary0
-                   >> prefetchSmallMutableArray (i-28) ary0
-                 readSMA ary0 i >>= flip f z >>= go (min (i-7) 0)
-{-# INLINE foldlSMA'P #-}
 
 length :: SmallArray# Int -> Int
 length ary = I# (sizeofSmallArray# ary)
@@ -267,6 +247,41 @@ shuffleArr sma@(SMA ar#) = do
       go arr (from,to) = swap to from arr
   foldM_ go sma ixs
   return sma
+------------------------------ Array helpers -----------------------------------
+
+
+---------------------------- Some Computations ---------------------------------
+-- a fold over small mutable arrays with no prefetching.
+foldlSMA' :: (a -> b -> IO b) -> b -> SmallMutableArray a -> IO b
+foldlSMA' f acc ary0 = go (lengthSMA ary0 - 1) acc
+  where
+    go 0  !z = return z
+    go i   z = readSMA ary0 i >>= flip f z >>= go (min (i-1) 0)
+{-# INLINE foldlSMA' #-}
+
+-- a fold over small mutable arrays with prefetching.
+foldlSMA'P :: (a -> b -> IO b) -> b -> SmallMutableArray a -> IO b
+foldlSMA'P f acc ary0 = go l acc
+  where
+    l = lengthSMA ary0 - 1
+    go 0 !z = return z
+    go i  z = do prefetchSmallMutableArray (i-3) ary0
+                 readSMA ary0 i >>= flip f z >>= go (min (i-1) 0)
+{-# INLINE foldlSMA'P #-}
+
+showSMA' :: Show a => SmallMutableArray a -> IO ()
+showSMA' ary0 = go (lengthSMA ary0 - 1)
+  where
+    go 0  = return ()
+    go i  = readSMA ary0 i >>= print >> go (i-1)
+{-# INLINE showSMA' #-}
+
+showSMA'P :: Show a => SmallMutableArray a -> IO ()
+showSMA'P ary0 = go (lengthSMA ary0 - 1)
+  where
+    go 0  = return ()
+    go i  = prefetchSmallMutableArray (i-3) ary0 >> readSMA ary0 i >>= print >> go (i-1)
+{-# INLINE showSMA'P #-}
 
 randomSum' :: SmallMutableArray (Int,Int) -> Int -> IO Int
 randomSum' arr times = do
@@ -314,3 +329,24 @@ randomSumP arr times = do
       go acc (ix:ixs) = do (x,y) <- readSMA arr ix
                            go (x + acc + y) ixs
   go 0 ixs
+---------------------------- Some Computations ---------------------------------
+
+
+---------------------------- Utils ---------------------------------------------
+inlinePerformIO :: IO a -> a
+inlinePerformIO (IO m) = case m realWorld# of
+  (# _, r #) -> r
+{-# INLINE inlinePerformIO #-}
+
+-- | an infinite stream of bytes and their generators
+randomBytes :: StdGen -> [(StdGen, Word8)]
+randomBytes g = (g, fromIntegral value) : randomBytes next
+  where (value, next) = genWord8 g
+
+-- | get cnt number of random byte strings
+randomBStrings :: Int -> StdGen -> [B.ByteString]
+randomBStrings 0   g = mempty
+randomBStrings cnt g = B.pack bs : randomBStrings (cnt-1) next
+  where (bs',(next,_):_) = splitAt 2048 $ randomBytes g
+        bs               = fmap snd bs'
+---------------------------- Utils ---------------------------------------------
